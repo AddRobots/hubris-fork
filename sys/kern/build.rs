@@ -33,6 +33,7 @@ struct Generated {
     tasks: Vec<TokenStream>,
     regions: Vec<TokenStream>,
     irq_code: TokenStream,
+    post_targets: TokenStream,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
