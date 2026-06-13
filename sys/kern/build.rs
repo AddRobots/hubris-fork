@@ -485,6 +485,11 @@ fn generate_statics(gen: &Generated) -> Result<()> {
 
     writeln!(file, "{}", gen.irq_code)?;
 
+    /////////////////////////////////////////////////////////
+    // Post-targets table
+
+    writeln!(file, "{}", gen.post_targets)?;
+
     drop(file);
     call_rustfmt::rustfmt(kconfig_path)?;
 
