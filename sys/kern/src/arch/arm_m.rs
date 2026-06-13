@@ -1238,10 +1238,23 @@ pub unsafe extern "C" fn DefaultHandler() {
                 // us. So ignore it to ensure we don't generate a bogus check.
                 disable_irq(irq_num, false).ok();
 
-                // Now, post the notification and return the
-                // scheduling hint.
+                // Post to the interrupt's owning task.
                 let n = task::NotificationSet(owner.notification);
-                tasks[owner.task as usize].post(n)
+                let mut wake = tasks[owner.task as usize].post(n);
+
+                // Post to any additional tasks declared via post-target in
+                // app.kdl. Linear scan is fine: the table is tiny and this
+                // runs after the IRQ lookup, which is the expensive step.
+                for entry in crate::startup::HUBRIS_POST_TARGETS
+                    .iter()
+                    .filter(|e| e.irq == irq_num)
+                {
+                    wake |= tasks[entry.task as usize].post(
+                        task::NotificationSet(entry.notification),
+                    );
+                }
+
+                wake
             });
             if switch {
                 pend_context_switch_from_isr()
