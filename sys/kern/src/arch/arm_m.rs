@@ -1039,6 +1039,16 @@ static TICKS: [AtomicU32; 2] = {
 #[no_mangle]
 pub unsafe extern "C" fn SysTick() {
     crate::profiling::event_timer_isr_enter();
+
+    // Update the current task's stack watermark on every tick.
+    {
+        let current = CURRENT_TASK_PTR.load(Ordering::Relaxed);
+        // Safety: CURRENT_TASK_PTR is valid once the kernel is started, and
+        // SysTick is only enabled once the kernel is started.
+        let t = unsafe { &mut *current };
+        t.update_stack_watermark();
+    }
+
     with_task_table(|tasks| {
         // Load the time before this tick event.
         let t0 = TICKS[0].load(Ordering::Relaxed);
