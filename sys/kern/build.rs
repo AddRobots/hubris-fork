@@ -328,10 +328,28 @@ fn process_config() -> Result<Generated> {
         panic!("Don't know the target {target}");
     };
 
+    let post_target_entries: Vec<TokenStream> = kconfig.post_targets.iter()
+        .map(|pt: &PostTargetConfig| {
+            let irq = pt.irq;
+            let task = pt.task_index as u32;
+            let notification = pt.notification;
+            quote::quote! {
+                abi::PostTargetEntry { irq: #irq, task: #task, notification: #notification }
+            }
+        })
+        .collect();
+
+    let post_targets = quote::quote! {
+        pub const HUBRIS_POST_TARGETS: &[abi::PostTargetEntry] = &[
+            #(#post_target_entries,)*
+        ];
+    };
+
     Ok(Generated {
         tasks: task_descs,
         regions: region_descs,
         irq_code,
+        post_targets,
     })
 }
 
