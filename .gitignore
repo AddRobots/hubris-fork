@@ -1,3 +1,19 @@
+target/
+itm.txt
+*.swp
+
+**/*.rs.bk
+.#*
+.gdb_history
+
+# editor files
+.vscode/*
+!.vscode/*.md
+!.vscode/*.svd
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/extensions.json
+
 # Covers JetBrains IDEs: IntelliJ, GoLand, RubyMine, PhpStorm, AppCode, PyCharm, CLion, Android Studio, WebStorm and Rider
 # Reference: https://intellij-support.jetbrains.com/hc/en-us/articles/206544839
 
@@ -121,20 +137,3 @@ Thumbs.db
 /open-mcx.hex
 /NXP.MCXN23x_DFP.pack
 /vscode-test/
-
-target/
-itm.txt
-*.swp
-
-**/*.rs.bk
-.#*
-.gdb_history
-
-# editor files
-.vscode/*
-!.vscode/*.md
-!.vscode/*.svd
-!.vscode/launch.json
-!.vscode/tasks.json
-!.vscode/extensions.json
-

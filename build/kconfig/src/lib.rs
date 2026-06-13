@@ -18,6 +18,20 @@ pub struct KernelConfig {
 
     /// Interrupts hooked by the application, keyed by IRQ number.
     pub irqs: BTreeMap<u32, InterruptConfig>,
+
+    /// Additional tasks to notify when a hardware IRQ fires, beyond the IRQ's
+    /// owning task. Sorted by irq for linear scan in DefaultHandler.
+    #[serde(default)]
+    pub post_targets: Vec<PostTargetConfig>,
+}
+
+/// Configuration for one post-target: when `irq` fires, also post
+/// `notification` bits to `task_index`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PostTargetConfig {
+    pub irq: u32,
+    pub task_index: usize,
+    pub notification: u32,
 }
 
 /// Configuration for a single hooked interrupt.
