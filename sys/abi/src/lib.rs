@@ -157,6 +157,15 @@ impl InterruptOwner {
     }
 }
 
+/// Entry in the post-targets table: when IRQ `irq` fires, also post
+/// `notification` bits to task `task`, in addition to the owning task.
+#[derive(Copy, Clone, Debug)]
+pub struct PostTargetEntry {
+    pub irq: u32,
+    pub task: u32,
+    pub notification: u32,
+}
+
 /// Description of one interrupt response.
 #[derive(Clone, Debug, FromBytes, Serialize, Deserialize)]
 pub struct Interrupt {
