@@ -8,8 +8,8 @@ use std::io::Write;
 
 use anyhow::{bail, Context, Result};
 use build_kconfig::{
-    InterruptConfig, KernelConfig, OwnedAddress, RegionAttributes,
-    RegionConfig, SpecialRole,
+    InterruptConfig, KernelConfig, OwnedAddress, PostTargetConfig,
+    RegionAttributes, RegionConfig, SpecialRole,
 };
 use indexmap::IndexMap;
 use proc_macro2::TokenStream;
