@@ -1350,21 +1350,45 @@ pub unsafe extern "C" fn DefaultHandler() {
                 // us. So ignore it to ensure we don't generate a bogus check.
                 disable_irq(irq_num, false).ok();
 
-                // Now, post the notification and return the
-                // scheduling hint.
+                // Post to the interrupt's owning task.
                 let n = task::NotificationSet(owner.notification);
-                let task = &mut tasks[owner.task as usize];
-                let woke = task.post(n);
+                let mut wake = tasks[owner.task as usize].post(n);
+                let mut switch_to: Option<&task::Task> = if wake {
+                    Some(&tasks[owner.task as usize])
+                } else {
+                    None
+                };
 
-                if woke {
-                    let p = task.priority();
-                    if p.is_more_important_than(current_prio) {
+                // Post to any additional tasks declared via post-target in
+                // app.kdl. Linear scan is fine: the table is tiny and this
+                // path runs after the O(1) IRQ lookup.
+                for entry in crate::startup::HUBRIS_POST_TARGETS
+                    .iter()
+                    .filter(|e| e.irq == irq_num)
+                {
+                    let target_woke = tasks[entry.task as usize].post(
+                        task::NotificationSet(entry.notification),
+                    );
+                    if target_woke {
+                        wake = true;
+                        let candidate = &tasks[entry.task as usize];
+                        let is_better = match switch_to {
+                            None => true,
+                            Some(cur) => candidate.priority()
+                                .is_more_important_than(cur.priority()),
+                        };
+                        if is_better {
+                            switch_to = Some(candidate);
+                        }
+                    }
+                }
+
+                if let Some(task) = switch_to {
+                    if task.priority().is_more_important_than(current_prio) {
                         // Safety: task is a reference into the task table.
                         unsafe {
                             pend_context_switch_from_isr(Some(task));
                         }
-                    } else {
-                        // No reason to churn the scheduler.
                     }
                 }
             });
