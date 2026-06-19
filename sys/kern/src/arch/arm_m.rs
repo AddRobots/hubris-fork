@@ -1352,7 +1352,7 @@ pub unsafe extern "C" fn DefaultHandler() {
 
                 // Post to the interrupt's owning task.
                 let n = task::NotificationSet(owner.notification);
-                let mut wake = tasks[owner.task as usize].post(n);
+                let wake = tasks[owner.task as usize].post(n);
                 // Track the highest-priority newly-woken task by index to
                 // avoid holding &task::Task refs across mutable .post() calls.
                 let mut switch_to_idx: Option<u32> = if wake {
@@ -1372,7 +1372,6 @@ pub unsafe extern "C" fn DefaultHandler() {
                         task::NotificationSet(entry.notification),
                     );
                     if target_woke {
-                        wake = true;
                         let is_better = match switch_to_idx {
                             None => true,
                             Some(cur) => tasks[entry.task as usize].priority()
