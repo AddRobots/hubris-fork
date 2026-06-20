@@ -166,6 +166,15 @@ pub struct PostTargetEntry {
     pub notification: u32,
 }
 
+/// Entry in the sys_post permission table: task `caller` may deliver
+/// `notification` bits to task `task` via the sys_post syscall.
+#[derive(Copy, Clone, Debug)]
+pub struct PostPermissionEntry {
+    pub caller: u32,
+    pub task: u32,
+    pub notification: u32,
+}
+
 /// Description of one interrupt response.
 #[derive(Clone, Debug, FromBytes, Serialize, Deserialize)]
 pub struct Interrupt {

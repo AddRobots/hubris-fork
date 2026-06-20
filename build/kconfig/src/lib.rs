@@ -23,6 +23,12 @@ pub struct KernelConfig {
     /// owning task. Sorted by irq for linear scan in DefaultHandler.
     #[serde(default)]
     pub post_targets: Vec<PostTargetConfig>,
+
+    /// Static permission table for the sys_post syscall. Only (caller, target)
+    /// pairs listed here may call sys_post from thread mode. Empty = no task
+    /// may call sys_post (DefaultHandler IRQ-based posting is unaffected).
+    #[serde(default)]
+    pub post_permissions: Vec<PostPermissionConfig>,
 }
 
 /// Configuration for one post-target: when `irq` fires, also post
@@ -30,6 +36,15 @@ pub struct KernelConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PostTargetConfig {
     pub irq: u32,
+    pub task_index: usize,
+    pub notification: u32,
+}
+
+/// Configuration for one sys_post permission: the task at `caller_index` may
+/// call the sys_post syscall to deliver `notification` bits to `task_index`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PostPermissionConfig {
+    pub caller_index: usize,
     pub task_index: usize,
     pub notification: u32,
 }

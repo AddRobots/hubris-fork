@@ -8,8 +8,8 @@ use std::io::Write;
 
 use anyhow::{bail, Context, Result};
 use build_kconfig::{
-    InterruptConfig, KernelConfig, OwnedAddress, PostTargetConfig,
-    RegionAttributes, RegionConfig, SpecialRole,
+    InterruptConfig, KernelConfig, OwnedAddress, PostPermissionConfig,
+    PostTargetConfig, RegionAttributes, RegionConfig, SpecialRole,
 };
 use indexmap::IndexMap;
 use proc_macro2::TokenStream;
@@ -34,6 +34,7 @@ struct Generated {
     regions: Vec<TokenStream>,
     irq_code: TokenStream,
     post_targets: TokenStream,
+    post_permissions: TokenStream,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -345,11 +346,29 @@ fn process_config() -> Result<Generated> {
         ];
     };
 
+    let post_permission_entries: Vec<TokenStream> = kconfig.post_permissions.iter()
+        .map(|pp: &PostPermissionConfig| {
+            let caller = pp.caller_index as u32;
+            let task = pp.task_index as u32;
+            let notification = pp.notification;
+            quote::quote! {
+                abi::PostPermissionEntry { caller: #caller, task: #task, notification: #notification }
+            }
+        })
+        .collect();
+
+    let post_permissions = quote::quote! {
+        pub const HUBRIS_POST_PERMISSIONS: &[abi::PostPermissionEntry] = &[
+            #(#post_permission_entries,)*
+        ];
+    };
+
     Ok(Generated {
         tasks: task_descs,
         regions: region_descs,
         irq_code,
         post_targets,
+        post_permissions,
     })
 }
 
@@ -485,6 +504,11 @@ fn generate_statics(gen: &Generated) -> Result<()> {
     // Post-targets table
 
     writeln!(file, "{}", gen.post_targets)?;
+
+    /////////////////////////////////////////////////////////
+    // Post-permissions table
+
+    writeln!(file, "{}", gen.post_permissions)?;
 
     drop(file);
     call_rustfmt::rustfmt(kconfig_path)?;

@@ -827,6 +827,21 @@ fn post(tasks: &mut [Task], caller: usize) -> Result<NextTask, UserError> {
 
     let peer_idx = task::check_task_id_against_table(tasks, peer_id)?;
 
+    // Enforce the static permission graph declared in app.kdl `can-post-to`
+    // nodes. Only (caller, target) pairs listed in HUBRIS_POST_PERMISSIONS may
+    // post via the sys_post syscall. The DefaultHandler IRQ path is unaffected.
+    let caller32 = caller as u32;
+    let peer32 = peer_idx as u32;
+    let bits = args.notification_bits.0;
+    let permitted = crate::startup::HUBRIS_POST_PERMISSIONS.iter().any(|p| {
+        p.caller == caller32
+            && p.task == peer32
+            && (p.notification & bits) == bits
+    });
+    if !permitted {
+        return Err(abi::UsageError::IllegalTask.into());
+    }
+
     let woke = tasks[peer_idx].post(args.notification_bits);
 
     tasks[caller].save_mut().set_error_response(0);
