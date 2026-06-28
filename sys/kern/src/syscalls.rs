@@ -839,7 +839,7 @@ fn post(tasks: &mut [Task], caller: usize) -> Result<NextTask, UserError> {
             && (p.notification & bits) == bits
     });
     if !permitted {
-        return Err(abi::UsageError::IllegalTask.into());
+        return Err(abi::UsageError::NotPermitted.into());
     }
 
     let woke = tasks[peer_idx].post(args.notification_bits);

@@ -408,6 +408,11 @@ pub enum UsageError {
     BadReplyFaultReason,
     NotSupervisor,
 
+    /// A program attempted an operation that the static permission table
+    /// embedded at build time does not allow — e.g. `sys_post` to a task
+    /// not listed in `can-post-to`.
+    NotPermitted,
+
     /// A server is attempting to reply with a message that is too large for the
     /// client to handle.
     ReplyTooBig,

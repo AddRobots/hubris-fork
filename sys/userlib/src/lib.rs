@@ -1614,6 +1614,14 @@ unsafe extern "C" fn sys_refresh_task_id_stub(_tid: u32) -> u32 {
     }
 }
 
+/// Posts `bits` as a notification bitmask to task `task_id`.
+///
+/// The calling task must be listed in the application's `can-post-to`
+/// declarations for `task_id` with a mask that is a superset of `bits`;
+/// otherwise this syscall faults the caller with
+/// [`abi::UsageError::NotPermitted`].
+///
+/// Returns 0 on success.
 #[inline(always)]
 pub fn sys_post(task_id: TaskId, bits: u32) -> u32 {
     unsafe { sys_post_stub(task_id.0 as u32, bits) }
