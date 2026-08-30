@@ -88,6 +88,13 @@ use abi::{FaultInfo, InterruptNum, UsageError};
 use armv8_m_mpu::{disable_mpu, enable_mpu};
 use unwrap_lite::UnwrapLite;
 
+#[cfg(feature = "diag-uart-checkpoint")]
+extern "C" {
+    fn uart_checkpoint(msg: *const u8);
+    fn uart_checkpoint_hex(label: *const u8, val: u32);
+    fn SVCall();
+}
+
 macro_rules! uassert {
     ($cond : expr) => {
         if !$cond {
@@ -112,6 +119,12 @@ static PROPOSED_TASK_PTR: AtomicPtr<task::Task> =
 /// store it in memory.
 #[no_mangle]
 static CLOCK_FREQ_KHZ: AtomicU32 = AtomicU32::new(0);
+
+/// Diagnostic-only: counts syscalls so the SVCall diag print below can sample
+/// every 64th one instead of flooding the UART on every single syscall.
+#[cfg(feature = "diag-uart-checkpoint")]
+#[no_mangle]
+static DIAG_SYSCALL_COUNT: AtomicU32 = AtomicU32::new(0);
 
 /// ARMvx-M volatile registers that must be saved across context switches.
 #[repr(C)]
@@ -745,6 +758,12 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
             }
         }
     }
+    #[cfg(feature = "diag-uart-checkpoint")]
+    unsafe {
+        uart_checkpoint(b"SF1\r\n\0".as_ptr());
+        let scb = &*cortex_m::peripheral::SCB::PTR;
+        uart_checkpoint_hex(b"VTOR\0".as_ptr(), scb.vtor.read());
+    }
 
     // Safety: this, too, is safe in practice but unsafe in API.
     unsafe {
@@ -757,6 +776,8 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
         // Enable counter and interrupt.
         syst.csr.modify(|v| v | 0b111);
     }
+    #[cfg(feature = "diag-uart-checkpoint")]
+    unsafe { uart_checkpoint(b"SF2\r\n\0".as_ptr()); }
     // We are manufacturing authority to interact with the MPU here, because we
     // can't thread a cortex-specific peripheral through an
     // architecture-independent API. This approach might bear revisiting later.
@@ -773,6 +794,8 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
     unsafe {
         mpu.ctrl.write(ENABLE | PRIVDEFENA);
     }
+    #[cfg(feature = "diag-uart-checkpoint")]
+    unsafe { uart_checkpoint(b"SF3\r\n\0".as_ptr()); }
 
     CURRENT_TASK_PTR.store(task as *const _ as *mut _, Ordering::Relaxed);
 
@@ -800,6 +823,8 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
     unsafe {
         cortex_m::register::psp::write(task.save().psp);
     }
+    #[cfg(feature = "diag-uart-checkpoint")]
+    unsafe { uart_checkpoint(b"SF4\r\n\0".as_ptr()); }
 
     // Run the final pre-kernel assembly sequence to set up the kernel
     // environment!
@@ -811,6 +836,51 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
     // use for system calls; the SVC entry sequence (also in this file) has code
     // to detect this condition and do kernel startup rather than processing it
     // as a syscall.
+    #[cfg(feature = "diag-uart-checkpoint")]
+    unsafe {
+        uart_checkpoint(b"SF5\r\n\0".as_ptr());
+        let scb = &*cortex_m::peripheral::SCB::PTR;
+        let vtor = scb.vtor.read();
+        uart_checkpoint(b"SF5a\r\n\0".as_ptr());
+
+        // Test whether the MPU -- configured for the FIRST TASK at SK5, which
+        // does not include the kernel-owned vector table region -- is what's
+        // blocking this read despite PRIVDEFENA. Dump MPU_CTRL, then fully
+        // disable the MPU for just this probe and see if the read succeeds.
+        let mpu = &*cortex_m::peripheral::MPU::PTR;
+        uart_checkpoint_hex(b"MPU_CTRL\0".as_ptr(), mpu.ctrl.read());
+        let mpu_ctrl_before = mpu.ctrl.read();
+        mpu.ctrl.write(0);
+        cortex_m::asm::dmb();
+        uart_checkpoint(b"SF5a2\r\n\0".as_ptr());
+
+        let reset = core::ptr::read_volatile((vtor + 1 * 4) as *const u32);
+        uart_checkpoint(b"SF5b\r\n\0".as_ptr());
+        let svcall = core::ptr::read_volatile((vtor + 11 * 4) as *const u32);
+        uart_checkpoint(b"SF5c\r\n\0".as_ptr());
+        let pendsv = core::ptr::read_volatile((vtor + 14 * 4) as *const u32);
+        uart_checkpoint(b"SF5d\r\n\0".as_ptr());
+        let systick = core::ptr::read_volatile((vtor + 15 * 4) as *const u32);
+        uart_checkpoint(b"SF5e\r\n\0".as_ptr());
+        uart_checkpoint_hex(b"VEC_RESET\0".as_ptr(), reset);
+        uart_checkpoint_hex(b"VEC_SVC\0".as_ptr(), svcall);
+        uart_checkpoint_hex(b"VEC_PENDSV\0".as_ptr(), pendsv);
+        uart_checkpoint_hex(b"VEC_SYSTICK\0".as_ptr(), systick);
+        uart_checkpoint(b"SF5f\r\n\0".as_ptr());
+        uart_checkpoint_hex(b"SVCALL_FN\0".as_ptr(), SVCall as *const () as u32);
+        uart_checkpoint(b"SF5g\r\n\0".as_ptr());
+        uart_checkpoint_hex(b"CONTROL\0".as_ptr(), cortex_m::register::control::read().bits());
+        uart_checkpoint(b"SF5h\r\n\0".as_ptr());
+        uart_checkpoint_hex(b"PRIMASK\0".as_ptr(), cortex_m::register::primask::read().is_active() as u32);
+        uart_checkpoint(b"SF5i\r\n\0".as_ptr());
+
+        // Restore the MPU to its pre-probe state (task regions + PRIVDEFENA)
+        // before falling into the SVC trap below.
+        mpu.ctrl.write(mpu_ctrl_before);
+        cortex_m::asm::dmb();
+        cortex_m::asm::isb();
+        uart_checkpoint(b"SF5j\r\n\0".as_ptr());
+    }
     cfg_if::cfg_if! {
         if #[cfg(armv6m)] {
             unsafe {
@@ -954,6 +1024,14 @@ cfg_if::cfg_if! {
             .globl SVCall
             .type SVCall,function
             SVCall:
+                @ --- DIAG: SVCall entry reached ---
+                push {{r0-r3, r12, lr}}
+                movw r0, #:lower16:__diag_sve_msg
+                movt r0, #:upper16:__diag_sve_msg
+                bl uart_checkpoint
+                pop {{r0-r3, r12, lr}}
+                @ --- end DIAG ---
+
                 @ Inspect LR to figure out the caller's mode.
                 mov r0, lr
                 mov r1, #0xFFFFFFF3
@@ -979,6 +1057,31 @@ cfg_if::cfg_if! {
                 stm r2!, {{r4-r12, lr}}
                 vstm r2, {{s16-s31}}
 
+                @ --- DIAG: sampled syscall/task snapshot (every 64th syscall) ---
+                push {{r0-r3, r11, r12, lr}}
+                movw r0, #:lower16:DIAG_SYSCALL_COUNT
+                movt r0, #:upper16:DIAG_SYSCALL_COUNT
+                ldr r2, [r0]
+                adds r2, r2, #1
+                str r2, [r0]
+                and r3, r2, #0x3F
+                cmp r3, #0
+                bne 9f
+                movw r1, #:lower16:CURRENT_TASK_PTR
+                movt r1, #:upper16:CURRENT_TASK_PTR
+                ldr r1, [r1]
+                uxth r1, r1
+                mov r3, r11
+                and r3, r3, #0xF
+                lsl r3, r3, #16
+                orr r1, r1, r3
+                movw r0, #:lower16:__diag_sys_msg
+                movt r0, #:upper16:__diag_sys_msg
+                bl uart_checkpoint_hex
+            9:
+                pop {{r0-r3, r11, r12, lr}}
+                @ --- end DIAG ---
+
                 @ syscall number is passed in r11. Move it into r0 to pass it as
                 @ an argument to the handler, then call the handler.
                 movs r0, r11
@@ -997,6 +1100,14 @@ cfg_if::cfg_if! {
                 bx lr
 
             1:  @ starting up the first task.
+                @ --- DIAG: startup path taken ---
+                push {{r0-r3, r12, lr}}
+                movw r0, #:lower16:__diag_svs_msg
+                movt r0, #:upper16:__diag_svs_msg
+                bl uart_checkpoint
+                pop {{r0-r3, r12, lr}}
+                @ --- end DIAG ---
+
                 movs r0, #1         @ get bitmask to...
                 msr CONTROL, r0     @ ...shed privs from thread mode.
                                     @ note: now barrier here because exc return
@@ -1005,7 +1116,22 @@ cfg_if::cfg_if! {
                 mov lr, {exc_return}    @ materialize EXC_RETURN value to
                                         @ return into thread mode, PSP, FP on
 
+                @ --- DIAG: about to unstack PSP frame and return to task ---
+                push {{r0-r3, r12, lr}}
+                movw r0, #:lower16:__diag_svx_msg
+                movt r0, #:upper16:__diag_svx_msg
+                bl uart_checkpoint
+                pop {{r0-r3, r12, lr}}
+                @ --- end DIAG ---
+
                 bx lr                   @ branch into user mode
+
+                .section .rodata
+                .align 2
+                __diag_sve_msg: .asciz \"SVE\\r\\n\"
+                __diag_svs_msg: .asciz \"SVS\\r\\n\"
+                __diag_svx_msg: .asciz \"SVX\\r\\n\"
+                __diag_sys_msg: .asciz \"SYS\"
             ",
             exc_return = const EXC_RETURN_CONST,
         }

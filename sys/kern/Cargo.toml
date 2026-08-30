@@ -37,6 +37,11 @@ phash-gen = { path = "../../build/phash-gen" }
 dump = []
 nano = []
 stack-watermark = []
+# Diagnostic-only: calls an extern "C" uart_checkpoint(msg) at bisection
+# points inside start_kernel(). The board's clock_stubs.c must define this
+# symbol. Not for normal use -- enabled only by kernel-generic-mcxn947 while
+# bisecting a silent post-start_kernel() hang.
+diag-uart-checkpoint = []
 
 [lib]
 test = false

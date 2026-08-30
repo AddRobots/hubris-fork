@@ -28,6 +28,25 @@ static mut HUBRIS_TASK_TABLE_SPACE:
 
 pub const HUBRIS_FAULT_NOTIFICATION: u32 = 1;
 
+// Diagnostic-only bisection helper (see `diag-uart-checkpoint` feature).
+// Defined by the board's clock_stubs.c; safe to call anywhere pre-scheduler
+// since it only touches raw UART registers.
+#[cfg(feature = "diag-uart-checkpoint")]
+extern "C" {
+    fn uart_checkpoint(msg: *const u8);
+}
+
+#[cfg(feature = "diag-uart-checkpoint")]
+macro_rules! diag_checkpoint {
+    ($msg:expr) => {
+        unsafe { uart_checkpoint(concat!($msg, "\r\n\0").as_ptr()) }
+    };
+}
+#[cfg(not(feature = "diag-uart-checkpoint"))]
+macro_rules! diag_checkpoint {
+    ($msg:expr) => {};
+}
+
 /// The main kernel entry point.
 ///
 /// We currently expect an application to provide its own `main`-equivalent
@@ -54,6 +73,7 @@ pub unsafe fn start_kernel(tick_divisor: u32) -> ! {
     unsafe {
         crate::arch::set_clock_freq(tick_divisor);
     }
+    diag_checkpoint!("SK1");
 
     // Grab references to all our statics.
     let task_descs = &HUBRIS_TASK_DESCS;
@@ -78,6 +98,7 @@ pub unsafe fn start_kernel(tick_divisor: u32) -> ! {
     for (i, task) in task_table.iter_mut().enumerate() {
         task.write(Task::from_descriptor(&task_descs[i]));
     }
+    diag_checkpoint!("SK2");
 
     // Safety: we have fully initialized this and can shed the uninit part.
     let task_table: &mut [Task; HUBRIS_TASK_COUNT] =
@@ -87,13 +108,17 @@ pub unsafe fn start_kernel(tick_divisor: u32) -> ! {
     for task in task_table.iter_mut() {
         crate::arch::reinitialize(task);
     }
+    diag_checkpoint!("SK3");
 
     // Great! Pick our first task. We'll act like we're scheduling after the
     // last task, which will cause a scan from 0 on.
     let first_task = crate::task::select(task_table.len() - 1, task_table);
+    diag_checkpoint!("SK4");
 
     crate::arch::apply_memory_protection(first_task);
+    diag_checkpoint!("SK5");
     TASK_TABLE_AVAIL.store(true, Ordering::Release);
+    diag_checkpoint!("SK6");
     crate::arch::start_first_task(tick_divisor, first_task)
 }
 
