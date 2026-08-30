@@ -120,12 +120,6 @@ static PROPOSED_TASK_PTR: AtomicPtr<task::Task> =
 #[no_mangle]
 static CLOCK_FREQ_KHZ: AtomicU32 = AtomicU32::new(0);
 
-/// Diagnostic-only: counts syscalls so the SVCall diag print below can sample
-/// every 64th one instead of flooding the UART on every single syscall.
-#[cfg(feature = "diag-uart-checkpoint")]
-#[no_mangle]
-static DIAG_SYSCALL_COUNT: AtomicU32 = AtomicU32::new(0);
-
 /// ARMvx-M volatile registers that must be saved across context switches.
 #[repr(C)]
 #[derive(Debug, Default)]
@@ -1024,14 +1018,6 @@ cfg_if::cfg_if! {
             .globl SVCall
             .type SVCall,function
             SVCall:
-                @ --- DIAG: SVCall entry reached ---
-                push {{r0-r3, r12, lr}}
-                movw r0, #:lower16:__diag_sve_msg
-                movt r0, #:upper16:__diag_sve_msg
-                bl uart_checkpoint
-                pop {{r0-r3, r12, lr}}
-                @ --- end DIAG ---
-
                 @ Inspect LR to figure out the caller's mode.
                 mov r0, lr
                 mov r1, #0xFFFFFFF3
@@ -1057,31 +1043,6 @@ cfg_if::cfg_if! {
                 stm r2!, {{r4-r12, lr}}
                 vstm r2, {{s16-s31}}
 
-                @ --- DIAG: sampled syscall/task snapshot (every 64th syscall) ---
-                push {{r0-r3, r11, r12, lr}}
-                movw r0, #:lower16:DIAG_SYSCALL_COUNT
-                movt r0, #:upper16:DIAG_SYSCALL_COUNT
-                ldr r2, [r0]
-                adds r2, r2, #1
-                str r2, [r0]
-                and r3, r2, #0x3F
-                cmp r3, #0
-                bne 9f
-                movw r1, #:lower16:CURRENT_TASK_PTR
-                movt r1, #:upper16:CURRENT_TASK_PTR
-                ldr r1, [r1]
-                uxth r1, r1
-                mov r3, r11
-                and r3, r3, #0xF
-                lsl r3, r3, #16
-                orr r1, r1, r3
-                movw r0, #:lower16:__diag_sys_msg
-                movt r0, #:upper16:__diag_sys_msg
-                bl uart_checkpoint_hex
-            9:
-                pop {{r0-r3, r11, r12, lr}}
-                @ --- end DIAG ---
-
                 @ syscall number is passed in r11. Move it into r0 to pass it as
                 @ an argument to the handler, then call the handler.
                 movs r0, r11
@@ -1100,14 +1061,6 @@ cfg_if::cfg_if! {
                 bx lr
 
             1:  @ starting up the first task.
-                @ --- DIAG: startup path taken ---
-                push {{r0-r3, r12, lr}}
-                movw r0, #:lower16:__diag_svs_msg
-                movt r0, #:upper16:__diag_svs_msg
-                bl uart_checkpoint
-                pop {{r0-r3, r12, lr}}
-                @ --- end DIAG ---
-
                 movs r0, #1         @ get bitmask to...
                 msr CONTROL, r0     @ ...shed privs from thread mode.
                                     @ note: now barrier here because exc return
@@ -1116,22 +1069,7 @@ cfg_if::cfg_if! {
                 mov lr, {exc_return}    @ materialize EXC_RETURN value to
                                         @ return into thread mode, PSP, FP on
 
-                @ --- DIAG: about to unstack PSP frame and return to task ---
-                push {{r0-r3, r12, lr}}
-                movw r0, #:lower16:__diag_svx_msg
-                movt r0, #:upper16:__diag_svx_msg
-                bl uart_checkpoint
-                pop {{r0-r3, r12, lr}}
-                @ --- end DIAG ---
-
                 bx lr                   @ branch into user mode
-
-                .section .rodata
-                .align 2
-                __diag_sve_msg: .asciz \"SVE\\r\\n\"
-                __diag_svs_msg: .asciz \"SVS\\r\\n\"
-                __diag_svx_msg: .asciz \"SVX\\r\\n\"
-                __diag_sys_msg: .asciz \"SYS\"
             ",
             exc_return = const EXC_RETURN_CONST,
         }
