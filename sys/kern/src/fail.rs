@@ -75,8 +75,30 @@ pub fn die(msg: impl Display) -> ! {
 #[inline(never)]
 fn die_impl(msg: &dyn Display) -> ! {
     let buf = begin_epitaph();
+    // Captured before `buf` is moved into `writer` below. `buf` is
+    // `KERNEL_EPITAPH`, a NUL-padded fixed buffer (see its declaration
+    // above), so this pointer is already safe to hand to a C-string
+    // consumer once `writer` has filled it in, as long as the message
+    // didn't fill it exactly (128 bytes).
+    #[cfg(feature = "diag-uart-checkpoint")]
+    let epitaph_ptr = buf.as_ptr();
     let mut writer = Eulogist { dest: buf };
     write!(writer, "{}", msg).ok();
+
+    // Diagnostic-only: without this, a kernel panic is completely invisible
+    // over UART -- the epitaph above is written to RAM for a debugger to
+    // find post-mortem, and this function then loops forever with zero
+    // output, which is indistinguishable on the wire from any other silent
+    // hang.
+    #[cfg(feature = "diag-uart-checkpoint")]
+    unsafe {
+        extern "C" {
+            fn uart_checkpoint(msg: *const u8);
+        }
+        uart_checkpoint(b"KERNEL PANIC: \0".as_ptr());
+        uart_checkpoint(epitaph_ptr);
+        uart_checkpoint(b"\r\n\0".as_ptr());
+    }
 
     loop {
         // Platform-independent NOP

@@ -799,6 +799,57 @@ fn explicit_panic(
     tasks: &mut [Task],
     caller: usize,
 ) -> Result<NextTask, UserError> {
+    // DIAGNOSTIC: a userspace `panic!()` reaches the kernel through this
+    // syscall (Sysnum::Panic), NOT through `handle_kernel_message`'s
+    // Kipcnum dispatch -- so it is invisible to the `KMSG` checkpoint added
+    // there. If `caller` is task 0 (supervisor), `force_fault` below marks
+    // supervisor itself `Faulted` and the notification it posts to wake
+    // task 0 back up is posted to the very task that just got marked
+    // Faulted, which `can_accept_notification()` will never satisfy again
+    // -- i.e. permanent, silent wedge with no rescuer, matching "silence
+    // forever" exactly. This checkpoint fires unconditionally, from kernel
+    // context, independent of whether `lpuart` (or the panicking task's own
+    // logging) ever runs.
+    #[cfg(feature = "diag-uart-checkpoint")]
+    unsafe {
+        extern "C" {
+            fn uart_checkpoint(msg: *const u8);
+            fn uart_checkpoint_hex(label: *const u8, val: u32);
+        }
+        uart_checkpoint(b"TASK PANIC\r\n\0".as_ptr());
+        uart_checkpoint_hex(b"  caller\0".as_ptr(), caller as u32);
+
+        // DIAGNOSTIC: `sys_panic(msg: &[u8])` passes the formatted panic
+        // message via arg0/arg1 (ptr/len), exactly like SEND's message
+        // argument (see `as_send_args`/`as_panic_args` conventions -- ptr in
+        // arg0, len in arg1). A bare `panic!()` with no format args produces
+        // the literal text "explicit panic"; anything else (e.g. a bounds
+        // check, an unwrap, or a deserialize error's Debug text) proves the
+        // panic did NOT come from kipc::read_task_status's own explicit,
+        // argument-less `panic!()` in its `Err(_)` arm, and instead points at
+        // something panicking with a message *inside* the ssmarshal/kipc/
+        // sys_send_to_kernel call chain.
+        let ptr = tasks[caller].save().arg0() as usize;
+        let len = tasks[caller].save().arg1() as usize;
+        let msg_slice = USlice::<u8>::from_raw(ptr, len).ok();
+        let msg_result = match &msg_slice {
+            Some(u) => tasks[caller].try_read(u).ok(),
+            None => None,
+        };
+        match msg_result {
+            Some(msg) => {
+                let mut buf = [0u8; 96];
+                let n = msg.len().min(buf.len() - 1);
+                buf[..n].copy_from_slice(&msg[..n]);
+                uart_checkpoint(b"  msg=\0".as_ptr());
+                uart_checkpoint(buf.as_ptr());
+                uart_checkpoint(b"\r\n\0".as_ptr());
+            }
+            None => {
+                uart_checkpoint(b"  msg=<unreadable>\r\n\0".as_ptr());
+            }
+        }
+    }
     // It's the easiest syscall!
     Ok(task::force_fault(tasks, caller, FaultInfo::Panic))
 }

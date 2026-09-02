@@ -21,6 +21,27 @@ pub fn handle_kernel_message(
     // Copy out arguments.
     let args = tasks[caller].save().as_send_args();
 
+    // DIAGNOSTIC: the task table shows `supervisor` (task 0) parked in
+    // `Runnable` forever -- under strict-priority scheduling that's only
+    // possible if it's the CPU's *current* occupant, spinning without ever
+    // reaching a blocking syscall again. Every path supervisor takes to
+    // observe/restart other tasks funnels through exactly this dispatcher,
+    // so tapping it here -- from kernel context, independent of whether
+    // `lpuart` (the task supervisor's own logging depends on) ever runs at
+    // all -- tells us definitively whether supervisor is still calling into
+    // the kernel (and if so, which operation, and how often) or has wedged
+    // in pure userspace code that never syscalls again.
+    #[cfg(feature = "diag-uart-checkpoint")]
+    unsafe {
+        extern "C" {
+            fn uart_checkpoint(msg: *const u8);
+            fn uart_checkpoint_hex(label: *const u8, val: u32);
+        }
+        uart_checkpoint(b"KMSG\r\n\0".as_ptr());
+        uart_checkpoint_hex(b"  caller\0".as_ptr(), caller as u32);
+        uart_checkpoint_hex(b"  op\0".as_ptr(), args.operation as u32);
+    }
+
     match Kipcnum::try_from(args.operation) {
         Ok(Kipcnum::ReadTaskStatus) => {
             read_task_status(tasks, caller, args.message?, args.response?)
@@ -101,14 +122,116 @@ fn read_task_status(
             UsageError::TaskOutOfRange,
         )));
     }
-    // cache other state before taking out a mutable borrow on tasks
-    let other_state = *tasks[index as usize].state();
 
-    let response_len =
-        serialize_response(&mut tasks[caller], response, &other_state)?;
-    tasks[caller]
-        .save_mut()
-        .set_send_response_and_length(0, response_len);
+    // Everything from the `other_state` cache through the response readback
+    // below runs inside one `cortex_m::interrupt::free` critical section.
+    //
+    // History: an earlier round masked interrupts only around the print/
+    // serialize/readback code that follows the cache -- that made zero
+    // difference to a reproducible, fully deterministic wrong byte in the
+    // response (confirmed with a synthetic canary value that serialized
+    // correctly through the identical code path). That ruled out an
+    // IRQ/stack-collision race in the code *after* the cache, but it left
+    // the cache itself, `*tasks[index as usize].state()`, unprotected.
+    // `TaskState` is a multi-word struct (an enum tag, a nested `FaultInfo`,
+    // and a `SchedState`), so that copy compiles to several load
+    // instructions, not one atomic load. Its only writer is `force_fault()`,
+    // called from the hardware fault handler in arch/arm_m.rs -- interrupt
+    // context. If a fault for this exact task were delivered mid-copy,
+    // `other_state` would end up a torn mix of bytes from two different
+    // `TaskState` values, exactly matching what was observed: a `match`
+    // reading the (torn) value as `StackOverflow` while a full-struct
+    // `ssmarshal::serialize` of the very same value produces bytes for a
+    // different variant, deterministically and regardless of how much code
+    // runs in between. Widening the critical section to cover the cache
+    // closes that gap.
+    cortex_m::interrupt::free(|_| -> Result<(), UserError> {
+        let other_state = *tasks[index as usize].state();
+
+        // Diagnostic tag is pure computation on `other_state` -- no FFI
+        // calls here. This must stay side-effect-free: see the note below
+        // on why no `uart_checkpoint*` call may run between capturing
+        // `other_state` and consuming it in `serialize_response`.
+        #[cfg(feature = "diag-uart-checkpoint")]
+        let tag: u32 = match &other_state {
+            TaskState::Healthy(SchedState::Stopped) => 0,
+            TaskState::Healthy(SchedState::Runnable) => 1,
+            TaskState::Healthy(SchedState::InSend(_)) => 2,
+            TaskState::Healthy(SchedState::InReply(_)) => 3,
+            TaskState::Healthy(SchedState::InRecv(_)) => 4,
+            TaskState::Faulted { fault, .. } => 0x100 + match fault {
+                FaultInfo::MemoryAccess { .. } => 0,
+                FaultInfo::StackOverflow { .. } => 1,
+                FaultInfo::BusError { .. } => 2,
+                FaultInfo::DivideByZero => 3,
+                FaultInfo::IllegalText => 4,
+                FaultInfo::IllegalInstruction => 5,
+                FaultInfo::InvalidOperation(_) => 6,
+                FaultInfo::SyscallUsage(_) => 7,
+                FaultInfo::Panic => 8,
+                FaultInfo::Injected(_) => 9,
+                FaultInfo::FromServer(_, _) => 10,
+            },
+        };
+
+        #[cfg(feature = "diag-uart-checkpoint")]
+        let response_for_readback = response.clone();
+
+        // History: this call used to run *after* a block of three
+        // `uart_checkpoint`/`uart_checkpoint_hex` extern "C" calls that
+        // referenced `other_state` only via the `tag` computation above.
+        // On MCXN947 (the only target where `diag-uart-checkpoint` is
+        // enabled) the wire bytes coming out of `serialize_response` were
+        // observed to disagree with `tag`: `tag` correctly showed
+        // `Faulted(StackOverflow)` but the serialized `FaultInfo`
+        // discriminant byte came out as `MemoryAccess`. `other_state` has
+        // exactly one writer (`force_fault()`, from fault-handler/interrupt
+        // context) and this whole block already runs inside
+        // `cortex_m::interrupt::free`, so it isn't that writer racing us.
+        // The only thing that changed between the correct read (for `tag`)
+        // and the corrupted read (here) was those three intervening FFI
+        // calls. Rather than chase the exact mechanism (kernel stack
+        // pressure from the extra call depth vs. something else), remove
+        // the possibility outright: `other_state` is now consumed here,
+        // immediately after being captured, with zero calls of any kind in
+        // between. All diagnostic output moves below, after the value has
+        // already been serialized.
+        let response_len =
+            serialize_response(&mut tasks[caller], response, &other_state)?;
+
+        #[cfg(feature = "diag-uart-checkpoint")]
+        unsafe {
+            extern "C" {
+                fn uart_checkpoint(msg: *const u8);
+                fn uart_checkpoint_hex(label: *const u8, val: u32);
+            }
+            uart_checkpoint(b"RTS\r\n\0".as_ptr());
+            uart_checkpoint_hex(b"  index\0".as_ptr(), index);
+            uart_checkpoint_hex(b"  tag\0".as_ptr(), tag);
+            uart_checkpoint_hex(b"  rlen\0".as_ptr(), response_len as u32);
+
+            match tasks[caller].try_read(&response_for_readback) {
+                Ok(bytes) => {
+                    let n = response_len.min(bytes.len());
+                    for (i, b) in bytes[..n].iter().enumerate() {
+                        uart_checkpoint_hex(
+                            b"  byte\0".as_ptr(),
+                            ((i as u32) << 8) | (*b as u32),
+                        );
+                    }
+                }
+                Err(_) => {
+                    uart_checkpoint(b"  readback failed\r\n\0".as_ptr());
+                }
+            }
+        }
+
+        tasks[caller]
+            .save_mut()
+            .set_send_response_and_length(0, response_len);
+        Ok(())
+    })?;
+
     Ok(NextTask::Same)
 }
 

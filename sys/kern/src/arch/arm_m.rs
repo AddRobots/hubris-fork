@@ -874,6 +874,33 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
         cortex_m::asm::dmb();
         cortex_m::asm::isb();
         uart_checkpoint(b"SF5j\r\n\0".as_ptr());
+
+        // DIAGNOSTIC PROBE: CONTROL read at SF5g showed FPCA=1 (and SFPA=1)
+        // going into the handoff `svc` below. Nothing in this kernel should
+        // have an active FP context at this point. If FPCA is set, exception
+        // entry for the upcoming `svc` auto-stacks an *extended* (FP) frame
+        // instead of the standard 8-word frame -- ~0x68 bytes larger -- onto
+        // the current (Main) stack, right after MSPLIM was armed at SF4. A
+        // stacking failure during exception entry with the limit already
+        // tight is a documented path straight to CPU Lockup, which no fault
+        // handler can ever observe (explains why panic-to-UART never fired).
+        // Clear FPCA/SFPA here to force a standard-frame stack for this one
+        // critical `svc`, and print CONTROL again to confirm it took.
+        {
+            let mut control: u32;
+            arch::asm!("mrs {0}, control", out(reg) control);
+            control &= !0b1100; // clear FPCA (bit2) and SFPA (bit3)
+            arch::asm!(
+                "msr control, {0}",
+                "isb",
+                in(reg) control,
+            );
+        }
+        uart_checkpoint(b"SF5k\r\n\0".as_ptr());
+        uart_checkpoint_hex(
+            b"CONTROL2\0".as_ptr(),
+            cortex_m::register::control::read().bits(),
+        );
     }
     cfg_if::cfg_if! {
         if #[cfg(armv6m)] {
@@ -1086,6 +1113,44 @@ cfg_if::cfg_if! {
 /// pointer while you have access to `task`, and as long as the `task` being
 /// stored is actually in the task table, you'll be okay.
 pub unsafe fn set_current_task(task: &task::Task) {
+    // REVERTED (uncommitted, never independently hardware-tested): a
+    // per-dispatch FPCA/SFPA-clearing block lived here, on the theory that
+    // a sticky CONTROL.FPCA left by one task's FP use could force an
+    // oversized exception frame onto the NEXT-scheduled task's stack. The
+    // one-shot version of this idea in `start_first_task` above was
+    // diagnosed from an actual CONTROL=1 readout at that specific spot;
+    // this per-dispatch generalization was written by extrapolation and
+    // never confirmed against hardware on its own.
+    //
+    // Prime suspect for the current bug: boot now goes completely silent
+    // (no panic, no further UART output at all — not even lpuart-server's
+    // own unconditional, TDRE-poll-bounded startup checkpoint) immediately
+    // after supervisor's 11th RestartTask call. Those 11 calls are plain
+    // syscalls that return control to supervisor itself; the first real
+    // context switch AWAY from supervisor only happens once supervisor
+    // reaches `sys_recv_notification(FAULT_NOTIF)` right after — i.e. the
+    // first point this function's raw `mrs`/`msr control`/`isb` sequence
+    // would ever actually execute. That's an exact timing match for a CPU
+    // lockup with nothing left able to print a fault. If reverting this
+    // resolves the silent hang, the real per-dispatch FPCA-frame-size
+    // hazard still needs a fix — just not this untested one.
+    //
+    // Reverting the above didn't change the hang at all (same silence
+    // right after supervisor's 11th RestartTask), which rules it out.
+    // Nothing checkpoints the scheduler's "pick next task"/dispatch path
+    // at all, so we can't yet tell whether this function -- the one place
+    // every dispatch funnels through -- is ever even reached again after
+    // supervisor's bring-up loop. This print answers that: does *any*
+    // subsequent context switch happen, and to which task index. No
+    // register writes, just a read of already-known data.
+    #[cfg(feature = "diag-uart-checkpoint")]
+    unsafe {
+        uart_checkpoint_hex(
+            b"  set_cur_task\0".as_ptr(),
+            task.descriptor().index as u32,
+        );
+    }
+
     CURRENT_TASK_PTR.store(task as *const _ as *mut _, Ordering::Relaxed);
     crate::profiling::event_context_switch(task.descriptor().index as usize);
 }
