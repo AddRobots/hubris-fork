@@ -1143,7 +1143,22 @@ pub unsafe fn set_current_task(task: &task::Task) {
     // supervisor's bring-up loop. This print answers that: does *any*
     // subsequent context switch happen, and to which task index. No
     // register writes, just a read of already-known data.
-    #[cfg(feature = "diag-uart-checkpoint")]
+    //
+    // REMOVED (2026-09-02, addrobots-hubris slip-message-tx stall
+    // investigation): that boot-hang bisection is long resolved (see
+    // addrobots-hubris memory mcxn947_boot_hang_saga.md), and this fires on
+    // *every single context switch* -- during the usbcdc/slip-message-rx
+    // contention under investigation that's potentially hundreds of prints
+    // per second, each a blocking write on the same physical (polled-TX)
+    // debug LPUART that slip-message-tx/usbcdc-server's own diagnostics
+    // share. At minimum it was drowning out/truncating the far more useful
+    // call=N/write-ok traces in every captured log; it may also have been
+    // materially perturbing the timing of the very starvation being
+    // diagnosed, since each switch now costs a full blocking UART write
+    // instead of just a pointer store. Left as a dead call site (cfg(any())
+    // rather than deleted outright) in case the boot-hang bisection is ever
+    // needed again.
+    #[cfg(any())]
     unsafe {
         uart_checkpoint_hex(
             b"  set_cur_task\0".as_ptr(),
@@ -1216,6 +1231,28 @@ pub unsafe extern "C" fn SysTick() {
             TICKS[1].store(t1 + 1, Ordering::Relaxed);
             (0, t1 + 1)
         };
+
+        // ALIVE heartbeat (2026-09-02, addrobots-hubris slip-message-tx
+        // stall investigation): fires from the hardware-timer-driven SysTick
+        // path itself -- independent of task scheduling, IPC, and the
+        // lpuart-server task -- via the same raw/polled/bounded-retry direct
+        // register write as set_current_task's now-disabled per-dispatch
+        // print (see uart_checkpoint_hex in clock_stubs.c). Purpose: during
+        // a stall where *no* application-level log line appears at all
+        // (call=/ANGLE/write-ok all silent), this is the only way to tell
+        // "the kernel is still alive and ticking, but lpuart-server itself
+        // is wedged so every task's own lpuart.write() IPC blocks forever"
+        // apart from "the whole system, including the timer-driven
+        // scheduler, is genuinely dead." At roughly once/sec (assuming a
+        // 1ms systick) this is negligible volume -- nowhere near the
+        // per-dispatch flood that made set_cur_task itself part of the
+        // problem.
+        #[cfg(feature = "diag-uart-checkpoint")]
+        if t0 & 0x3FF == 0 {
+            unsafe {
+                uart_checkpoint_hex(b"ALIVE\0".as_ptr(), t0);
+            }
+        }
 
         // Process any timers.
         let now = Timestamp::from([t0, t1]);
